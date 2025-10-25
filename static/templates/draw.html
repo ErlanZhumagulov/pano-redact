@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Рисование поверх изображения (адаптивно)</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+            padding: 20px;
+            gap: 20px;
+        }
+        .toolbar {
+            background: white;
+            padding: 12px 16px;
+            border-radius: 12px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.18);
+            flex-wrap: wrap;
+            width: 100%;
+            max-width: 900px;
+        }
+        .tool-btn { padding: 10px 16px; border: 2px solid #ddd; border-radius: 10px; background: white; cursor: pointer; font-size: 15px; font-weight: 600; }
+        .tool-btn.active { background: #667eea; color: #fff; border-color: #667eea; }
+        .size-control { display:flex; gap:8px; align-items:center; }
+        .size-control input[type="range"] { width:120px; }
+
+        /* контейнер, который будет масштабироваться под экран устройства */
+        .canvas-container {
+            position: relative;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.45);
+            border-radius: 10px;
+            overflow: hidden;
+            background: white;
+            /* по умолчанию ширина будет подгоняться через JS */
+            max-width: 100%;
+            touch-action: none; /* предотвращаем нежелательную прокрутку при рисовании */
+        }
+
+        /* два наложенных холста */
+        canvas {
+            display: block;
+            cursor: crosshair;
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;   /* CSS масштабирование — внутренние пиксели остаются в атрибутах width/height */
+            height: 100%;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        #bgCanvas { pointer-events: none; }
+
+        .clear-btn { background: #dc3545; color: white; border: none; padding: 10px 14px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+
+        @media (max-width: 420px) {
+            .toolbar { padding: 10px; gap: 8px; }
+            .size-control input[type="range"] { width: 90px; }
+        }
+    </style>
+</head>
+<body>
+<div class="toolbar" id="toolbar">
+    <button class="tool-btn active" id="brushBtn" onclick="selectTool('brush')">🖌️ Кисть</button>
+    <button class="tool-btn" id="eraserBtn" onclick="selectTool('eraser')">🧹 Ластик</button>
+    <div class="size-control">
+        <label>Размер:</label>
+        <input type="range" id="sizeSlider" min="1" max="100" value="5">
+        <span id="sizeValue">5</span>
+    </div>
+    <div class="size-control">
+        <label>Цвет:</label>
+        <input type="color" id="colorPicker" value="#000000">
+    </div>
+    <button class="clear-btn" onclick="clearDrawing()">🗑️ Очистить</button>
+</div>
+
+<div class="canvas-container" id="canvasWrap">
+    <canvas id="bgCanvas"></canvas>
+    <canvas id="drawCanvas"></canvas>
+</div>
+
+<script>
+    // --- элементы ---
+    const bgCanvas = document.getElementById('bgCanvas');
+    const bgCtx = bgCanvas.getContext('2d');
+    const drawCanvas = document.getElementById('drawCanvas');
+    const ctx = drawCanvas.getContext('2d');
+    const wrap = document.getElementById('canvasWrap');
+    const toolbar = document.getElementById('toolbar');
+
+    // замените на ваш URL
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = '{{.URL}}'; // <-- поставьте ссылку на изображение
+
+    let drawing = false;
+    let currentTool = 'brush';
+    let brushSize = 5;
+    let brushColor = '#000000';
+
+    // --- UI ---
+    const brushBtn = document.getElementById('brushBtn');
+    const eraserBtn = document.getElementById('eraserBtn');
+    const sizeSlider = document.getElementById('sizeSlider');
+    const sizeValue = document.getElementById('sizeValue');
+    const colorPicker = document.getElementById('colorPicker');
+
+    function selectTool(tool) {
+        currentTool = tool;
+        brushBtn.classList.toggle('active', tool === 'brush');
+        eraserBtn.classList.toggle('active', tool === 'eraser');
+    }
+    sizeSlider.addEventListener('input', (e) => { brushSize = +e.target.value; sizeValue.textContent = brushSize; });
+    colorPicker.addEventListener('input', (e) => { brushColor = e.target.value; });
+
+    // --- установка размеров канвасов под изображение (внутренние пиксели) ---
+    function fitCanvasesToImage() {
+        // внутренние размеры холстов (атрибуты) — реальные пиксели
+        bgCanvas.width = img.naturalWidth || img.width;
+        bgCanvas.height = img.naturalHeight || img.height;
+        drawCanvas.width = bgCanvas.width;
+        drawCanvas.height = bgCanvas.height;
+
+        // рисуем изображение в нижний холст в натуральном размере
+        bgCtx.clearRect(0,0,bgCanvas.width,bgCanvas.height);
+        bgCtx.drawImage(img, 0, 0, bgCanvas.width, bgCanvas.height);
+
+        // очищаем слой рисунка
+        ctx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+
+        // применяем адаптивное масштабирование (CSS ширина/высота контейнера)
+        applyResponsiveScale();
+    }
+
+    // --- масштабируем видимую область, чтобы весь рисунок помещался на экране телефона ---
+    function applyResponsiveScale() {
+        // доступное пространство на экране
+        const padding = 40; // учитывать отступы body
+        const availableWidth = window.innerWidth - padding;
+        const availableHeight = window.innerHeight - toolbar.getBoundingClientRect().height - padding;
+
+        const imgW = bgCanvas.width;
+        const imgH = bgCanvas.height;
+
+        // если изображение ещё не загружено — ничего не делать
+        if (!imgW || !imgH) return;
+
+        // вычисляем коэффициент масштабирования (уменьшаем только если нужно)
+        const scale = Math.min(availableWidth / imgW, availableHeight / imgH);
+
+        // задаём видимые размеры контейнера (CSS-пиксели)
+        const visibleW = Math.round(imgW * scale);
+        const visibleH = Math.round(imgH * scale);
+
+        wrap.style.width = visibleW + 'px';
+        wrap.style.height = visibleH + 'px';
+
+        // оба холста настроены в CSS на 100% контейнера — это обеспечивает корректную визуальную подгонку
+        // важно: внутренние атрибуты width/height (пиксели канвы) остаются неизменными => высокое качество при экспорте
+    }
+
+    // --- правильное преобразование координат указателя с учётом CSS-масштабирования ---
+    function getPointerPos(e) {
+        const rect = drawCanvas.getBoundingClientRect();
+        const clientX = (e.touches && e.touches[0]) ? e.touches[0].clientX : e.clientX;
+        const clientY = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
+
+        // масштаб между внутренними пикселями и CSS размерами
+        const scaleX = drawCanvas.width / rect.width;
+        const scaleY = drawCanvas.height / rect.height;
+
+        return {
+            x: (clientX - rect.left) * scaleX,
+            y: (clientY - rect.top) * scaleY
+        };
+    }
+
+    function startDrawing(e) {
+        e.preventDefault();
+        drawing = true;
+        const pos = getPointerPos(e);
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y);
+    }
+
+    function draw(e) {
+        if (!drawing) return;
+        e.preventDefault();
+        const pos = getPointerPos(e);
+
+        ctx.lineWidth = brushSize;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        if (currentTool === 'brush') {
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.strokeStyle = brushColor;
+        } else {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.strokeStyle = 'rgba(0,0,0,1)';
+        }
+
+        ctx.lineTo(pos.x, pos.y);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y);
+    }
+
+    function stopDrawing(e) {
+        drawing = false;
+        ctx.beginPath();
+    }
+
+    function clearDrawing() {
+        ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    }
+
+    // экспорт комбинированного изображения
+    function exportCombinedPNG() {
+        const exportCanvas = document.createElement('canvas');
+        exportCanvas.width = bgCanvas.width;
+        exportCanvas.height = bgCanvas.height;
+        const exportCtx = exportCanvas.getContext('2d');
+        exportCtx.drawImage(bgCanvas, 0, 0);
+        exportCtx.drawImage(drawCanvas, 0, 0);
+        return exportCanvas.toDataURL('image/png');
+    }
+    window.exportCombinedPNG = exportCombinedPNG;
+
+    // события рисования
+    drawCanvas.addEventListener('mousedown', startDrawing);
+    drawCanvas.addEventListener('mousemove', draw);
+    window.addEventListener('mouseup', stopDrawing);
+
+    drawCanvas.addEventListener('touchstart', startDrawing, {passive: false});
+    drawCanvas.addEventListener('touchmove', draw, {passive: false});
+    window.addEventListener('touchend', stopDrawing);
+
+    // реагируем на изменение размера окна / повороты экрана
+    window.addEventListener('resize', () => { applyResponsiveScale(); });
+    window.addEventListener('orientationchange', () => { setTimeout(applyResponsiveScale, 120); });
+
+    // загрузка изображения
+    img.onload = () => {
+        fitCanvasesToImage();
+    };
+
+    // если изображение кэшировано и уже загружено
+    if (img.complete && img.naturalWidth) {
+        fitCanvasesToImage();
+    }
+
+    // --- подсказка: если нужно гарантировать, что изображение никогда не растягивается больше экрана,
+    // можно заменить Math.min(..., 1) на Math.min(...), чтобы разрешить увеличение — сейчас оно запрещено.
+</script>
+</body>
+</html>
